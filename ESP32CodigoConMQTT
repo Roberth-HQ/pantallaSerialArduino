@@ -1,0 +1,172 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// Configuración de la red WiFi
+const char* ssid = "GalaxyA30P";
+const char* password = "////////";
+
+// Configuración del broker MQTT
+const char* mqtt_server = "broker.hivemq.com";
+const char* topic = "personas/reconocidas";
+const char* clientID = "ESP32Client_";
+
+// Configuración de hardware
+const int LED_PIN = 27;
+const int RELAY_PIN = 25;
+const int BUTTON_PIN = 26;
+const unsigned long MSG_DISPLAY_TIME = 15000; // 15 segundos en milisegundos
+const unsigned long LED_BLINK_INTERVAL = 422; // 500 ms para parpadeo
+
+// Variables globales
+unsigned long lastMsgTime = 0;
+unsigned long lastBlinkTime = 0;
+bool messageDisplaying = false;
+bool ledAndRelayActive = false;
+bool ledState = false; // Estado del LED para parpadeo
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+LiquidCrystal_I2C lcd(0x3F, 16, 2);
+
+String getUniqueClientId() {
+    return String(clientID) + String(random(0xffff), HEX);
+}
+
+void setup_wifi() {
+    delay(10);
+    Serial.println("\n------- Configuración WiFi -------");
+    Serial.printf("Conectando a %s\n", ssid);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Conectando WiFi...");
+    
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println("\nWiFi conectado");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi OK");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+    delay(2000);
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+    String msg = "";
+    for (int i = 0; i < length; i++) {
+        msg += (char)payload[i];
+    }
+
+    // Procesar el mensaje
+    int commaIndex = msg.indexOf(',');
+    if (commaIndex == -1) {
+        Serial.println("Error: Formato incorrecto");
+        return;
+    }
+
+    String name = msg.substring(0, commaIndex);
+    String ci = msg.substring(commaIndex + 1);
+
+    // Activar LED y relé
+    digitalWrite(RELAY_PIN, HIGH);
+    ledAndRelayActive = true;
+
+    // Mostrar información
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("" + name);
+    lcd.setCursor(0, 1);
+    lcd.print("CI: " + ci);
+
+    // Indicar que se está mostrando un mensaje
+    messageDisplaying = true;
+}
+
+void reconnect() {
+    while (!client.connected()) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Conectando MQTT");
+        
+        if (client.connect(getUniqueClientId().c_str())) {
+            client.subscribe(topic);
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("MQTT Conectado");
+        } else {
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Error MQTT");
+            delay(2000);
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    
+    // Configurar LED, relé y pulsador
+    pinMode(LED_PIN, OUTPUT);
+    pinMode(RELAY_PIN, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP); // Pulsador conectado a tierra (activo en LOW)
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(RELAY_PIN, LOW);
+    
+    // Inicializar LCD
+    lcd.init();
+    lcd.backlight();
+    
+    // Configuración inicial
+    setup_wifi();
+    client.setServer(mqtt_server, 1883);
+    client.setCallback(callback);
+    client.setBufferSize(1024);
+}
+
+void loop() {
+    if (!client.connected()) {
+        reconnect();
+    }
+    client.loop();
+
+    // Si LED y relé están activos, parpadeo del LED y esperar a que el pulsador sea presionado
+    if (ledAndRelayActive) {
+        unsigned long currentMillis = millis();
+
+        // Control del parpadeo del LED
+        if (currentMillis - lastBlinkTime >= LED_BLINK_INTERVAL) {
+            ledState = !ledState;
+            digitalWrite(LED_PIN, ledState);
+            lastBlinkTime = currentMillis;
+        }
+
+        // Verificar si el pulsador fue presionado
+        if (digitalRead(BUTTON_PIN) == LOW) { // Pulsador presionado
+            digitalWrite(LED_PIN, LOW);
+            digitalWrite(RELAY_PIN, LOW);
+            ledAndRelayActive = false;
+
+            // Mantener mensaje en pantalla por 15 segundos
+            lastMsgTime = millis();
+        }
+    }
+
+    // Verificar si el mensaje debe ser limpiado después de 15 segundos
+    if (messageDisplaying && !ledAndRelayActive && (millis() - lastMsgTime >= MSG_DISPLAY_TIME)) {
+        messageDisplaying = false;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("MQTT Conectado");
+    }
+}
